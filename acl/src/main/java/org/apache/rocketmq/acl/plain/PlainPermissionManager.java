@@ -18,6 +18,20 @@ package org.apache.rocketmq.acl.plain;
 
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.rocketmq.acl.common.AclConstants;
+import org.apache.rocketmq.acl.common.AclException;
+import org.apache.rocketmq.acl.common.AclUtils;
+import org.apache.rocketmq.acl.common.Permission;
+import org.apache.rocketmq.common.AclConfig;
+import org.apache.rocketmq.common.DataVersion;
+import org.apache.rocketmq.common.MixAll;
+import org.apache.rocketmq.common.PlainAccessConfig;
+import org.apache.rocketmq.common.constant.LoggerName;
+import org.apache.rocketmq.common.topic.TopicValidator;
+import org.apache.rocketmq.logging.InternalLogger;
+import org.apache.rocketmq.logging.InternalLoggerFactory;
+import org.apache.rocketmq.srvutil.AclFileWatchService;
 
 import java.io.File;
 import java.io.IOException;
@@ -35,21 +49,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
-
-import org.apache.commons.lang3.StringUtils;
-import org.apache.rocketmq.acl.common.AclConstants;
-import org.apache.rocketmq.acl.common.AclException;
-import org.apache.rocketmq.acl.common.AclUtils;
-import org.apache.rocketmq.acl.common.Permission;
-import org.apache.rocketmq.common.AclConfig;
-import org.apache.rocketmq.common.DataVersion;
-import org.apache.rocketmq.common.MixAll;
-import org.apache.rocketmq.common.PlainAccessConfig;
-import org.apache.rocketmq.common.constant.LoggerName;
-import org.apache.rocketmq.common.topic.TopicValidator;
-import org.apache.rocketmq.logging.InternalLogger;
-import org.apache.rocketmq.logging.InternalLoggerFactory;
-import org.apache.rocketmq.srvutil.AclFileWatchService;
 
 public class PlainPermissionManager {
 
@@ -80,10 +79,18 @@ public class PlainPermissionManager {
     private final DataVersion dataVersion = new DataVersion();
 
     private List<String> fileList = new ArrayList<>();
+    private AclFileWatchService aclFileWatchService;
 
     public PlainPermissionManager() {
         load();
         watch();
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            System.out.println("Shutdown aclFileWatchService");
+            if (null != aclFileWatchService && !aclFileWatchService.isStopped()) {
+                aclFileWatchService.shutdown();
+            }
+            this.isWatchStart = false;
+        }));
     }
 
     public List<String> getAllAclFiles(String path) {
@@ -122,9 +129,17 @@ public class PlainPermissionManager {
         assureAclConfigFilesExist();
         
         fileList = getAllAclFiles(defaultAclDir);
+
+        log.warn("In load(), first fileList={}", fileList);
+
         if (new File(defaultAclFile).exists() && !fileList.contains(defaultAclFile)) {
             fileList.add(defaultAclFile);
+            log.warn("In load(), {} added in filelist!! fileHome={}, rocketmq.acl.plain.file={}",
+                    defaultAclFile, fileHome, System.getProperty("rocketmq.acl.plain.file"));
+
         }
+
+        log.warn("In load(), final fileList={}", fileList);
 
         for (int i = 0; i < fileList.size(); i++) {
             final String currentFile = fileList.get(i);
@@ -134,7 +149,7 @@ public class PlainPermissionManager {
                 log.warn("No data in file {}", currentFile);
                 continue;
             }
-            log.info("Broker plain acl conf data is : ", plainAclConfData.toString());
+            log.info("Broker plain acl conf data is : {}", plainAclConfData.toString());
 
             List<RemoteAddressStrategy> globalWhiteRemoteAddressStrategyList = new ArrayList<>();
             JSONArray globalWhiteRemoteAddressesList = plainAclConfData.getJSONArray("globalWhiteRemoteAddresses");
@@ -215,7 +230,7 @@ public class PlainPermissionManager {
             log.warn("No data in {}, skip it", aclFilePath);
             return;
         }
-        log.info("Broker plain acl conf data is : ", plainAclConfData.toString());
+        log.info("Broker plain acl conf data in {} is : {}", aclFilePath, plainAclConfData.toString());
         JSONArray globalWhiteRemoteAddressesList = plainAclConfData.getJSONArray("globalWhiteRemoteAddresses");
         if (globalWhiteRemoteAddressesList != null && !globalWhiteRemoteAddressesList.isEmpty()) {
             for (int i = 0; i < globalWhiteRemoteAddressesList.size(); i++) {
@@ -538,7 +553,7 @@ public class PlainPermissionManager {
 
     private void watch() {
         try {
-            AclFileWatchService aclFileWatchService = new AclFileWatchService(defaultAclDir, defaultAclFile, new AclFileWatchService.Listener() {
+            aclFileWatchService = new AclFileWatchService(defaultAclDir, defaultAclFile, new AclFileWatchService.Listener() {
                 @Override
                 public void onFileChanged(String aclFileName) {
                     load(aclFileName);
@@ -645,6 +660,8 @@ public class PlainPermissionManager {
         if (plainAccessResource.getAccessKey() == null) {
             throw new AclException(String.format("No accessKey is configured"));
         }
+
+        log.warn("accessKeyTable={}", accessKeyTable);
 
         if (!accessKeyTable.containsKey(plainAccessResource.getAccessKey())) {
             throw new AclException(String.format("No acl config for %s", plainAccessResource.getAccessKey()));

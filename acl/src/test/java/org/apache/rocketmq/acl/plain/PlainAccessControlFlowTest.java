@@ -34,6 +34,8 @@ import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
@@ -57,6 +59,7 @@ import java.util.Map;
  * <p> Case 3: Both conf/plain_acl.yml and conf/acl/plain_acl.yml exists.
  */
 public class PlainAccessControlFlowTest {
+
     public static final String DEFAULT_TOPIC = "topic-acl";
 
     public static final String DEFAULT_GROUP = "GID_acl";
@@ -147,8 +150,11 @@ public class PlainAccessControlFlowTest {
 
     }
 
+    private static final Logger logger = LoggerFactory.getLogger(PlainAccessControlFlowTest.class);
+
     @Test
     public void testEmptyAclFolderCase() throws NoSuchFieldException, IllegalAccessException {
+        logger.warn("================testEmptyAclFolderCase begin ===================");
         this.isCheckCase1 = true;
         System.setProperty("rocketmq.home.dir", Paths.get("src/test/resources/empty_acl_folder_conf").toString());
         PlainAccessValidator plainAccessValidator = new PlainAccessValidator();
@@ -156,23 +162,27 @@ public class PlainAccessControlFlowTest {
         checkDefaultAclFileExists(plainAccessValidator);
         testValidationAfterConsecutiveUpdates(plainAccessValidator);
         testValidationAfterConfigFileChanged(plainAccessValidator);
-
+        logger.warn("================testEmptyAclFolderCase end ===================");
     }
 
     @Test
     public void testOnlyAclFolderCase() throws NoSuchFieldException, IllegalAccessException {
+        logger.warn("================testOnlyAclFolderCase begin ===================");
         this.isCheckCase2 = true;
-        System.setProperty("rocketmq.home.dir", Paths.get("src/test/resources/only_acl_folder_conf").toString());
+        System.setProperty("rocketmq.home.dir", Paths.get("src/test/resources/only_acl_folder_conf").toAbsolutePath().toString());
+        logger.warn("rocketmq.home.dir=" + System.getProperty("rocketmq.home.dir"));
         PlainAccessValidator plainAccessValidator = new PlainAccessValidator();
 
         checkDefaultAclFileExists(plainAccessValidator);
         testValidationAfterConsecutiveUpdates(plainAccessValidator);
         testValidationAfterConfigFileChanged(plainAccessValidator);
+        logger.warn("================testOnlyAclFolderCase end ===================");
     }
 
 
     @Test
     public void testBothAclFileAndFolderCase() throws NoSuchFieldException, IllegalAccessException {
+        logger.warn("================testBothAclFileAndFolderCase begin ===================");
         this.isCheckCase3 = true;
         System.setProperty("rocketmq.home.dir", Paths.get("src/test/resources/both_acl_file_folder_conf").toString());
         PlainAccessValidator plainAccessValidator = new PlainAccessValidator();
@@ -180,7 +190,7 @@ public class PlainAccessControlFlowTest {
         checkDefaultAclFileExists(plainAccessValidator);
         testValidationAfterConsecutiveUpdates(plainAccessValidator);
         testValidationAfterConfigFileChanged(plainAccessValidator);
-
+        logger.warn("================testBothAclFileAndFolderCase end ===================");
     }
 
     private void testValidationAfterConfigFileChanged(PlainAccessValidator plainAccessValidator) throws NoSuchFieldException, IllegalAccessException {
@@ -194,6 +204,7 @@ public class PlainAccessControlFlowTest {
 
         // write prepared PlainAccessConfigs to file
         final String aclConfigFile = System.getProperty("rocketmq.home.dir") + File.separator + "conf/plain_acl.yml";
+        logger.warn("to write ymlMap to {}", aclConfigFile);
         AclUtils.writeDataObject(aclConfigFile, ymlMap);
 
         loadConfigFile(plainAccessValidator, aclConfigFile);
@@ -208,7 +219,9 @@ public class PlainAccessControlFlowTest {
         plainAccessConfigList.remove(consumerAccessConfig);
         AclUtils.writeDataObject(aclConfigFile, ymlMap);
 
+        logger.warn("before load, yml={}", ymlMap);
         loadConfigFile(plainAccessValidator, aclConfigFile);
+        logger.warn("After load ACL config from {}, version={}", aclConfigFile, plainAccessValidator.getAllAclConfigVersion());
 
         // sending messages will be successful using prepared credentials
         SessionCredentials producerCredential = new SessionCredentials(DEFAULT_PRODUCER_AK, DEFAULT_PRODUCER_SK);
@@ -258,8 +271,9 @@ public class PlainAccessControlFlowTest {
         validatePullMessage(DEFAULT_TOPIC, DEFAULT_GROUP, consumerHook, "", plainAccessValidator);
 
         // load from file
+        logger.warn("In testValidationAfterConsecutiveUpdates, to load: "+System.getProperty("rocketmq.home.dir") + File.separator + "conf/plain_acl.yml");
         loadConfigFile(plainAccessValidator,
-                System.getProperty("rocketmq.home.dir") + File.separator + "conf/plain_acl.yml");
+                Paths.get(System.getProperty("rocketmq.home.dir") + File.separator + "conf/plain_acl.yml").toAbsolutePath().toString());
         SessionCredentials unmatchedCredential = new SessionCredentials("non_exists_sk", "non_exists_sk");
         AclClientRPCHook dummyHook = new AclClientRPCHook(unmatchedCredential);
         validateSendMessage(RequestCode.SEND_MESSAGE, DEFAULT_TOPIC, dummyHook, DEFAULT_GLOBAL_WHITE_ADDR, plainAccessValidator);

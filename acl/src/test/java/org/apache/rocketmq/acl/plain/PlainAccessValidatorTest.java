@@ -16,18 +16,6 @@
  */
 package org.apache.rocketmq.acl.plain;
 
-import java.io.File;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.lang.reflect.Field;
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
 import org.apache.rocketmq.acl.common.AclClientRPCHook;
 import org.apache.rocketmq.acl.common.AclConstants;
 import org.apache.rocketmq.acl.common.AclException;
@@ -55,6 +43,19 @@ import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public class PlainAccessValidatorTest {
 
@@ -914,7 +915,7 @@ public class PlainAccessValidatorTest {
         PlainAccessValidator plainAccessValidator = new PlainAccessValidator();
         plainAccessValidator.updateAccessConfig(plainAccessConfig);
         boolean success = plainAccessValidator.deleteAccessConfig("deleteAccessAclToEmpty");
-        System.setProperty("rocketmq.acl.plain.file", "/conf/plain_acl.yml");
+        System.setProperty("rocketmq.acl.plain.file", "conf/plain_acl.yml");
         Assert.assertTrue(success);
     }
 
