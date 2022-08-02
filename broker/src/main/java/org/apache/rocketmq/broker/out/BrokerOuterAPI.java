@@ -22,6 +22,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -820,6 +821,53 @@ public class BrokerOuterAPI {
         final MessageExt msg, String group,
         long timeoutMillis) throws RemotingException, MQBrokerException, InterruptedException {
 
+        RemotingCommand request = buildSendMessageRequest(msg, group);
+
+        RemotingCommand response = this.remotingClient.invokeSync(brokerAddr, request, timeoutMillis);
+
+        return this.processSendResponse(brokerName, msg, response);
+    }
+
+    public CompletableFuture<SendResult> sendMessageToSpecificBrokerAsync(String brokerAddr, final String brokerName,
+                                                                          final MessageExt msg, String group,
+                                                                          long timeoutMillis) {
+        RemotingCommand request = buildSendMessageRequest(msg, group);
+
+        CompletableFuture<SendResult> cf = new CompletableFuture<>();
+        final String msgId = msg.getMsgId();
+        try {
+            this.remotingClient.invokeAsync(brokerAddr, request, timeoutMillis, responseFuture -> {
+                RemotingCommand response = responseFuture.getResponseCommand();
+                if (null != response) {
+                    SendResult sendResult = null;
+                    try {
+                        sendResult = this.processSendResponse(brokerName, msg, response);
+                        cf.complete(sendResult);
+                    } catch (MQBrokerException | RemotingCommandException e) {
+                        LOGGER.error("processSendResponse in sendMessageToSpecificBrokerAsync failed, msgId=" + msgId, e);
+                        cf.completeExceptionally(e);
+                    }
+                } else {
+                    cf.complete(null);
+                }
+
+            });
+        } catch (Throwable t) {
+            LOGGER.error("invokeAsync failed in sendMessageToSpecificBrokerAsync, msgId=" + msgId, t);
+            cf.completeExceptionally(t);
+        }
+        return cf;
+    }
+
+    private static RemotingCommand buildSendMessageRequest(MessageExt msg, String group) {
+        SendMessageRequestHeaderV2 requestHeaderV2 = buildSendMessageRequestHeaderV2(msg, group);
+        RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.SEND_MESSAGE_V2, requestHeaderV2);
+
+        request.setBody(msg.getBody());
+        return request;
+    }
+
+    private static SendMessageRequestHeaderV2 buildSendMessageRequestHeaderV2(MessageExt msg, String group) {
         SendMessageRequestHeader requestHeader = new SendMessageRequestHeader();
         requestHeader.setProducerGroup(group);
         requestHeader.setTopic(msg.getTopic());
@@ -834,13 +882,7 @@ public class BrokerOuterAPI {
         requestHeader.setBatch(false);
 
         SendMessageRequestHeaderV2 requestHeaderV2 = SendMessageRequestHeaderV2.createSendMessageRequestHeaderV2(requestHeader);
-        RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.SEND_MESSAGE_V2, requestHeaderV2);
-
-        request.setBody(msg.getBody());
-
-        RemotingCommand response = this.remotingClient.invokeSync(brokerAddr, request, timeoutMillis);
-
-        return this.processSendResponse(brokerName, msg, response);
+        return requestHeaderV2;
     }
 
     private SendResult processSendResponse(

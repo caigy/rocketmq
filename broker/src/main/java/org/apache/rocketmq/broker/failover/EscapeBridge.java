@@ -19,24 +19,52 @@ package org.apache.rocketmq.broker.failover;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ForkJoinWorkerThread;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
+
+import org.apache.commons.lang3.RandomUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.client.consumer.DefaultMQPullConsumer;
 import org.apache.rocketmq.client.consumer.PullResult;
 import org.apache.rocketmq.client.consumer.PullStatus;
+import org.apache.rocketmq.client.exception.MQBrokerException;
 import org.apache.rocketmq.client.exception.MQClientException;
-import org.apache.rocketmq.client.producer.DefaultMQProducer;
-import org.apache.rocketmq.client.producer.MessageQueueSelector;
-import org.apache.rocketmq.client.producer.SendCallback;
+import org.apache.rocketmq.client.impl.factory.MQClientInstance;
+import org.apache.rocketmq.client.impl.producer.TopicPublishInfo;
 import org.apache.rocketmq.client.producer.SendResult;
+import org.apache.rocketmq.client.producer.SendStatus;
+import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.constant.LoggerName;
-import org.apache.rocketmq.common.message.Message;
+import org.apache.rocketmq.common.message.MessageConst;
 import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageQueue;
+import org.apache.rocketmq.common.protocol.route.BrokerData;
+import org.apache.rocketmq.common.protocol.route.TopicRouteData;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.logging.InternalLoggerFactory;
+import org.apache.rocketmq.remoting.exception.RemotingException;
 import org.apache.rocketmq.store.GetMessageResult;
 import org.apache.rocketmq.common.message.MessageExtBrokerInner;
 import org.apache.rocketmq.store.MessageStore;
@@ -45,13 +73,24 @@ import org.apache.rocketmq.store.PutMessageStatus;
 
 public class EscapeBridge {
     protected static final InternalLogger LOG = InternalLoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
+    private static final long SEND_TIMEOUT = 3000L;
+    private static final long LOCK_TIMEOUT_MILLIS = 3000L;
+    private static final int DEFAULT_RETRY_TIMES = 3;
     private final String innerProducerGroupName;
     private final String innerConsumerGroupName;
 
     private final BrokerController brokerController;
 
-    private DefaultMQProducer innerProducer;
     private DefaultMQPullConsumer innerConsumer;
+
+    private final ConcurrentMap<String/* topic */, TopicPublishInfo> topicPublishInfoTable = new ConcurrentHashMap<>();
+    private final Lock lockNamesrv = new ReentrantLock();
+    private final ConcurrentMap<String/* Topic */, TopicRouteData>  topicRouteTable = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String/* Broker Name */, HashMap<Long/* brokerId */, String/* address */>> brokerAddrTable =
+            new ConcurrentHashMap<>();
+    private Executor defaultAsyncSenderExecutor;
+    private ScheduledExecutorService scheduledExecutorService;
+    private static final long POLL_NAMESERVER_INTERVAL = 1000 * 30L;
 
     public EscapeBridge(BrokerController brokerController) {
         this.brokerController = brokerController;
@@ -63,33 +102,58 @@ public class EscapeBridge {
         if (brokerController.getBrokerConfig().isEnableSlaveActingMaster() && brokerController.getBrokerConfig().isEnableRemoteEscape()) {
             String nameserver = this.brokerController.getNameServerList();
             if (nameserver != null && !nameserver.isEmpty()) {
-                startInnerProducer(nameserver);
                 startInnerConsumer(nameserver);
                 LOG.info("start inner producer and consumer success.");
+
+                final BlockingQueue<Runnable> asyncSenderThreadPoolQueue = new LinkedBlockingQueue<>(50000);
+                this.defaultAsyncSenderExecutor = new ThreadPoolExecutor(
+                        Runtime.getRuntime().availableProcessors(),
+                        Runtime.getRuntime().availableProcessors(),
+                        1000 * 60,
+                        TimeUnit.MILLISECONDS,
+                        asyncSenderThreadPoolQueue,
+                        new ThreadFactory() {
+                            private final AtomicInteger threadIndex = new AtomicInteger(0);
+
+                            @Override
+                            public Thread newThread(Runnable r) {
+                                return new Thread(r, "AsyncEscapeBridgeExecutor_" + this.threadIndex.incrementAndGet());
+                            }
+                        });
+
+                this.scheduledExecutorService = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
+                    @Override
+                    public Thread newThread(Runnable r) {
+                        return new Thread(r, "EscapeBridgeScheduledThread");
+                    }
+                });
+                this.scheduledExecutorService.scheduleAtFixedRate(() -> {
+                    try {
+                        updateTopicRouteInfoFromNameServer();
+                    } catch (Exception e) {
+                        LOG.error("ScheduledTask updateTopicRouteInfoFromNameServer exception", e);
+                    }
+                }, 10, POLL_NAMESERVER_INTERVAL, TimeUnit.MILLISECONDS);
+
+                LOG.info("init executor for escaping messages asynchronously success.");
             } else {
                 throw new RuntimeException("nameserver address is null or empty");
             }
         }
     }
 
-    public void shutdown() {
-        if (this.innerProducer != null) {
-            this.innerProducer.shutdown();
+    private void updateTopicRouteInfoFromNameServer() {
+        if (null == topicRouteTable || topicRouteTable.isEmpty()) {
+            return;
         }
-
-        if (this.innerConsumer != null) {
-            this.innerConsumer.shutdown();
+        for (String topic : topicRouteTable.keySet()) {
+            this.updateTopicRouteInfoFromNameServer(topic);
         }
     }
 
-    private void startInnerProducer(String nameServer) throws MQClientException {
-        try {
-            innerProducer = new DefaultMQProducer(innerProducerGroupName);
-            innerProducer.setNamesrvAddr(nameServer);
-            innerProducer.start();
-        } catch (MQClientException e) {
-            LOG.error("start inner producer failed, nameserver address: {}", nameServer, e);
-            throw e;
+    public void shutdown() {
+        if (this.innerConsumer != null) {
+            this.innerConsumer.shutdown();
         }
     }
 
@@ -109,12 +173,11 @@ public class EscapeBridge {
         if (masterBroker != null) {
             return masterBroker.getMessageStore().putMessage(messageExt);
         } else if (this.brokerController.getBrokerConfig().isEnableSlaveActingMaster()
-            && this.brokerController.getBrokerConfig().isEnableRemoteEscape()
-            && innerProducer != null) {
-            // Remote Acting lead to born timestamp, msgId changed, it need to polish.
+            && this.brokerController.getBrokerConfig().isEnableRemoteEscape()) {
+
             try {
                 messageExt.setWaitStoreMsgOK(false);
-                SendResult sendResult = innerProducer.send(messageExt);
+                final SendResult sendResult = putMessageToRemoteBroker(messageExt, DEFAULT_RETRY_TIMES);
                 return transformSendResult2PutResult(sendResult);
             } catch (Exception e) {
                 LOG.error("sendMessageInFailover to remote failed", e);
@@ -127,36 +190,297 @@ public class EscapeBridge {
         }
     }
 
+    private SendResult putMessageToRemoteBroker(MessageExtBrokerInner messageExt, final int retryTimes)  {
+        final TopicPublishInfo topicPublishInfo = this.tryToFindTopicPublishInfo(messageExt.getTopic());
+        if (null == topicPublishInfo || !topicPublishInfo.ok()) {
+            LOG.warn("putMessageToRemoteBroker: no route info of topic {} when escaping message, msgId={}",
+                    messageExt.getTopic(), messageExt.getMsgId());
+            return null;
+        }
+
+        final long invokeID = RandomUtils.nextLong(0, Long.MAX_VALUE);
+        final long beginTimestampFirst = System.currentTimeMillis();
+        long beginTimestampPrev = beginTimestampFirst;
+        String lastBrokerName;
+        MessageQueue mq = null;
+        long endTimestamp;
+        int times = 0;
+        String[] brokersSent = new String[retryTimes];
+        for (; times < retryTimes + 1; times++) {
+            lastBrokerName = null == mq ? null : mq.getBrokerName();
+            MessageQueue mqSelected = topicPublishInfo.selectOneMessageQueue(lastBrokerName);
+            messageExt.setQueueId(mqSelected.getQueueId());
+            mq = mqSelected;
+
+            String brokerNameToSend = mq.getBrokerName();
+            brokersSent[times] = brokerNameToSend;
+            String brokerAddrToSend = this.findBrokerAddressInPublish(brokerNameToSend);
+            final SendResult sendResult;
+            try {
+                beginTimestampPrev = System.currentTimeMillis();
+                sendResult = this.brokerController.getBrokerOuterAPI().sendMessageToSpecificBroker(
+                        brokerAddrToSend, lastBrokerName,
+                        messageExt, this.getProducerGroup(messageExt), SEND_TIMEOUT);
+                if (null != sendResult && SendStatus.SEND_OK.equals(sendResult.getSendStatus())) {
+                    return sendResult;
+                }
+            } catch (RemotingException | MQBrokerException e) {
+                endTimestamp = System.currentTimeMillis();
+                LOG.warn(String.format("putMessageToRemoteBroker exception, resend at once, InvokeID: %s, RT: %sms, Broker: %s",
+                        invokeID, endTimestamp - beginTimestampPrev, mq), e);
+                LOG.warn(String.valueOf(messageExt));
+            } catch (InterruptedException e) {
+                endTimestamp = System.currentTimeMillis();
+                LOG.warn(String.format("putMessageToRemoteBroker exception, return null sendResult, InvokeID: %s, RT: %sms, Broker: %s",
+                        invokeID, endTimestamp - beginTimestampPrev, mq), e);
+                LOG.warn(String.valueOf(messageExt));
+                return null;
+            }
+
+        }
+
+        LOG.error("Escaping failed! send {} times, cost {}ms, Topic: {}, MsgId: {}, BrokersSent: {}",
+                times, System.currentTimeMillis() - beginTimestampFirst, messageExt.getTopic(),
+                messageExt.getMsgId(), Arrays.toString(brokersSent));
+        return null;
+    }
+
     public CompletableFuture<PutMessageResult> asyncPutMessage(MessageExtBrokerInner messageExt) {
         BrokerController masterBroker = this.brokerController.peekMasterBroker();
-        CompletableFuture<PutMessageResult> completableFuture = new CompletableFuture<>();
         if (masterBroker != null) {
             return masterBroker.getMessageStore().asyncPutMessage(messageExt);
         } else if (this.brokerController.getBrokerConfig().isEnableSlaveActingMaster()
-            && this.brokerController.getBrokerConfig().isEnableRemoteEscape()
-            && innerProducer != null) {
-            // Remote Acting lead to born timestamp, msgId changed, it need to polish.
+                && this.brokerController.getBrokerConfig().isEnableRemoteEscape()) {
             try {
                 messageExt.setWaitStoreMsgOK(false);
-                innerProducer.send(messageExt, new SendCallback() {
-                    @Override public void onSuccess(SendResult sendResult) {
-                        completableFuture.complete(transformSendResult2PutResult(sendResult));
-                    }
 
-                    @Override public void onException(Throwable e) {
-                        completableFuture.complete(new PutMessageResult(PutMessageStatus.PUT_TO_REMOTE_BROKER_FAIL, null, true));
-                    }
-                });
-                return completableFuture;
+                TopicPublishInfo topicPublishInfo = this.tryToFindTopicPublishInfo(messageExt.getTopic());
+                final String producerGroup = getProducerGroup(messageExt);
+                final CompletableFuture<SendResult> retryFuture = wrapRetryableFuture(
+                        (lastBroker) -> {
+                            MessageQueue mqSelected = topicPublishInfo.selectOneMessageQueue(lastBroker);
+                            messageExt.setQueueId(mqSelected.getQueueId());
+
+                            String brokerNameToSend = mqSelected.getBrokerName();
+                            String brokerAddrToSend = this.findBrokerAddressInPublish(brokerNameToSend);
+                            return this.brokerController.getBrokerOuterAPI().sendMessageToSpecificBrokerAsync(brokerAddrToSend,
+                                    brokerNameToSend, messageExt,
+                                    producerGroup, SEND_TIMEOUT);
+                        },
+                        DEFAULT_RETRY_TIMES,
+                        null,
+                        defaultAsyncSenderExecutor);
+
+                return retryFuture.exceptionally(throwable -> null)
+                        .thenApplyAsync((sendResult) -> {
+                            return transformSendResult2PutResult(sendResult);
+                        }, this.defaultAsyncSenderExecutor)
+                        .exceptionally(throwable -> {
+                            return transformSendResult2PutResult(null);
+                        });
+
             } catch (Exception e) {
                 LOG.error("sendMessageInFailover to remote failed", e);
                 return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.PUT_TO_REMOTE_BROKER_FAIL, null, true));
             }
         } else {
             LOG.warn("Put message failed, enableSlaveActingMaster={}, enableRemoteEscape={}.",
-                this.brokerController.getBrokerConfig().isEnableSlaveActingMaster(), this.brokerController.getBrokerConfig().isEnableRemoteEscape());
+                    this.brokerController.getBrokerConfig().isEnableSlaveActingMaster(), this.brokerController.getBrokerConfig().isEnableRemoteEscape());
             return CompletableFuture.completedFuture(new PutMessageResult(PutMessageStatus.SERVICE_NOT_AVAILABLE, null));
         }
+    }
+
+    private static CompletableFuture<SendResult> wrapRetryableFuture(Function<String, CompletableFuture<SendResult>> action,
+                                                                     int retryTimes, String lastBrokerName,
+                                                                     Executor executor) {
+        CompletableFuture<SendResult> future = new CompletableFuture<>();
+        action.apply(lastBrokerName)
+                .whenCompleteAsync((sendResult, throwable) -> {
+                            if (null != throwable || null == sendResult) {
+                                if (retryTimes <= 0) {
+                                    future.complete(null);
+                                } else {
+                                    retrySendMessageAsync(future, action, retryTimes - 1, lastBrokerName, executor);
+                                }
+                            } else {
+                                future.complete(sendResult);
+                            }
+                        },
+                        executor);
+        return future;
+    }
+
+    private static void retrySendMessageAsync(CompletableFuture<SendResult> future, Function<String, CompletableFuture<SendResult>> action,
+                                              int leftRetryTimes, String lastBrokerName, Executor executor) {
+        action.apply(lastBrokerName)
+                .whenCompleteAsync((sendResult, throwable) -> {
+                            if (null != throwable || null == sendResult) {
+                                if (leftRetryTimes <= 0) {
+                                    future.complete(null);
+                                } else {
+                                    LOG.info("retry escaping message async, sendRestult={}, current leftRetryTimes=", sendResult, leftRetryTimes);
+                                    retrySendMessageAsync(future, action, leftRetryTimes - 1, lastBrokerName, executor);
+                                }
+                            } else {
+                                LOG.info("escaping message async completed result={}, leftRetryTimes=", sendResult, leftRetryTimes);
+                                future.complete(sendResult);
+                            }
+                        },
+                        executor);
+    }
+
+    private String getProducerGroup(MessageExtBrokerInner messageExt) {
+        if (null == messageExt) {
+            return this.innerProducerGroupName;
+        }
+        String producerGroup = messageExt.getProperty(MessageConst.PROPERTY_PRODUCER_GROUP);
+        if (StringUtils.isEmpty(producerGroup)) {
+            producerGroup = this.innerProducerGroupName;
+        }
+        return producerGroup;
+    }
+
+    private TopicPublishInfo tryToFindTopicPublishInfo(final String topic) {
+        TopicPublishInfo topicPublishInfo = this.topicPublishInfoTable.get(topic);
+        if (null == topicPublishInfo || !topicPublishInfo.ok()) {
+            this.topicPublishInfoTable.putIfAbsent(topic, new TopicPublishInfo());
+            this.updateTopicRouteInfoFromNameServer(topic);
+            topicPublishInfo = this.topicPublishInfoTable.get(topic);
+        }
+        return topicPublishInfo;
+    }
+
+    private boolean updateTopicRouteInfoFromNameServer(String topic) {
+        try {
+            if (this.lockNamesrv.tryLock(LOCK_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+                try {
+                    TopicRouteData topicRouteData = this.brokerController.getBrokerOuterAPI()
+                            .getTopicRouteInfoFromNameServer(topic, SEND_TIMEOUT);
+                    if (topicRouteData != null) {
+                        TopicRouteData old = this.topicRouteTable.get(topic);
+                        boolean changed = this.topicRouteDataIsChange(old, topicRouteData);
+                        if (!changed) {
+                            changed = this.isNeedUpdateTopicRouteInfo(topic);
+                        } else {
+                            LOG.info("the topic[{}] route info changed, old[{}] ,new[{}]", topic, old, topicRouteData);
+                        }
+
+                        if (changed) {
+
+                            for (BrokerData bd : topicRouteData.getBrokerDatas()) {
+                                this.brokerAddrTable.put(bd.getBrokerName(), bd.getBrokerAddrs());
+                            }
+
+                            // Update Pub info
+                            {
+                                TopicPublishInfo publishInfo = MQClientInstance.topicRouteData2TopicPublishInfo(topic, topicRouteData);
+                                publishInfo.setHaveTopicRouterInfo(true);
+                                this.updateTopicPublishInfo(topic, publishInfo);
+
+                            }
+
+//                            // Update sub info
+//                            if (!consumerTable.isEmpty()) {
+//                                Set<MessageQueue> subscribeInfo = topicRouteData2TopicSubscribeInfo(topic, topicRouteData);
+//                                Iterator<Map.Entry<String, MQConsumerInner>> it = this.consumerTable.entrySet().iterator();
+//                                while (it.hasNext()) {
+//                                    Map.Entry<String, MQConsumerInner> entry = it.next();
+//                                    MQConsumerInner impl = entry.getValue();
+//                                    if (impl != null) {
+//                                        impl.updateTopicSubscribeInfo(topic, subscribeInfo);
+//                                    }
+//                                }
+//                            }
+                            TopicRouteData cloneTopicRouteData = new TopicRouteData(topicRouteData);
+                            LOG.info("topicRouteTable.put. Topic = {}, TopicRouteData[{}]", topic, cloneTopicRouteData);
+                            this.topicRouteTable.put(topic, cloneTopicRouteData);
+                            return true;
+                        }
+                    } else {
+                        LOG.warn("EscapeBridge: updateTopicRouteInfoFromNameServer, getTopicRouteInfoFromNameServer return null, Topic: {}.", topic);
+                    }
+                } catch (RemotingException e) {
+                    LOG.error("updateTopicRouteInfoFromNameServer Exception", e);
+                    //throw new IllegalStateException(e);
+                } catch (MQBrokerException e) {
+                    LOG.error("updateTopicRouteInfoFromNameServer Exception", e);
+                } finally {
+                    this.lockNamesrv.unlock();
+                }
+            }
+        } catch (InterruptedException e) {
+            LOG.warn("updateTopicRouteInfoFromNameServer Exception", e);
+        }
+        return false;
+    }
+
+    public void updateTopicPublishInfo(final String topic, final TopicPublishInfo info) {
+        if (info != null && topic != null) {
+            TopicPublishInfo prev = this.topicPublishInfoTable.put(topic, info);
+            if (prev != null) {
+                LOG.info("updateTopicPublishInfo prev is not null, " + prev);
+            }
+        }
+    }
+
+    private boolean isNeedUpdateTopicRouteInfo(final String topic) {
+        // copy from org.apache.rocketmq.client.impl.producer.DefaultMQProducerImpl.isPublishTopicNeedUpdate
+        TopicPublishInfo prev = this.topicPublishInfoTable.get(topic);
+        return null == prev || !prev.ok();
+
+//        boolean result = false;
+//        {
+//            Iterator<Map.Entry<String, MQProducerInner>> it = this.producerTable.entrySet().iterator();
+//            while (it.hasNext() && !result) {
+//                Map.Entry<String, MQProducerInner> entry = it.next();
+//                MQProducerInner impl = entry.getValue();
+//                if (impl != null) {
+//                    result = impl.isPublishTopicNeedUpdate(topic);
+//                }
+//            }
+//        }
+//
+//        if (result) {
+//            return true;
+//        }
+
+//        {
+//            Iterator<Map.Entry<String, MQConsumerInner>> it = this.consumerTable.entrySet().iterator();
+//            while (it.hasNext() && !result) {
+//                Map.Entry<String, MQConsumerInner> entry = it.next();
+//                MQConsumerInner impl = entry.getValue();
+//                if (impl != null) {
+//                    result = impl.isSubscribeTopicNeedUpdate(topic);
+//                }
+//            }
+//        }
+//
+//        return result;
+    }
+
+    private boolean topicRouteDataIsChange(TopicRouteData olddata, TopicRouteData nowdata) {
+        if (olddata == null || nowdata == null)
+            return true;
+        TopicRouteData old = new TopicRouteData(olddata);
+        TopicRouteData now = new TopicRouteData(nowdata);
+        Collections.sort(old.getQueueDatas());
+        Collections.sort(old.getBrokerDatas());
+        Collections.sort(now.getQueueDatas());
+        Collections.sort(now.getBrokerDatas());
+        return !old.equals(now);
+
+    }
+
+    private String findBrokerAddressInPublish(String brokerName) {
+        if (brokerName == null) {
+            return null;
+        }
+        Map<Long/* brokerId */, String/* address */> map = this.brokerAddrTable.get(brokerName);
+        if (map != null && !map.isEmpty()) {
+            return map.get(MixAll.MASTER_ID);
+        }
+
+        return null;
     }
 
     public PutMessageResult putMessageToSpecificQueue(MessageExtBrokerInner messageExt) {
@@ -164,19 +488,24 @@ public class EscapeBridge {
         if (masterBroker != null) {
             return masterBroker.getMessageStore().putMessage(messageExt);
         } else if (this.brokerController.getBrokerConfig().isEnableSlaveActingMaster()
-            && this.brokerController.getBrokerConfig().isEnableRemoteEscape()
-            && this.innerProducer != null) {
+            && this.brokerController.getBrokerConfig().isEnableRemoteEscape()) {
             try {
                 messageExt.setWaitStoreMsgOK(false);
-                // Remote Acting lead to born timestamp, msgId changed, it need to polish.
-                SendResult sendResult = innerProducer.send(messageExt, new MessageQueueSelector() {
-                    @Override
-                    public MessageQueue select(List<MessageQueue> mqs, Message msg, Object arg) {
-                        String id = (String) arg;
-                        int index = Math.abs(id.hashCode()) % mqs.size();
-                        return mqs.get(index);
-                    }
-                }, messageExt.getTopic() + messageExt.getStoreHost());
+
+                final TopicPublishInfo topicPublishInfo = this.tryToFindTopicPublishInfo(messageExt.getTopic());
+                List<MessageQueue> mqs = topicPublishInfo.getMessageQueueList();
+
+                String id = messageExt.getTopic() + messageExt.getStoreHost();
+                int index = Math.abs(id.hashCode()) % mqs.size();
+                MessageQueue mq = mqs.get(index);
+                messageExt.setQueueId(mq.getQueueId());
+
+                String brokerNameToSend = mq.getBrokerName();
+                String brokerAddrToSend = this.findBrokerAddressInPublish(brokerNameToSend);
+                final SendResult sendResult = this.brokerController.getBrokerOuterAPI().sendMessageToSpecificBroker(
+                        brokerAddrToSend, brokerNameToSend,
+                        messageExt, this.getProducerGroup(messageExt), SEND_TIMEOUT);
+
                 return transformSendResult2PutResult(sendResult);
             } catch (Exception e) {
                 LOG.error("sendMessageInFailover to remote failed", e);
