@@ -30,8 +30,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ForkJoinPool;
-import java.util.concurrent.ForkJoinWorkerThread;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
@@ -76,6 +74,7 @@ public class EscapeBridge {
     private static final long SEND_TIMEOUT = 3000L;
     private static final long LOCK_TIMEOUT_MILLIS = 3000L;
     private static final int DEFAULT_RETRY_TIMES = 3;
+    private static final long DEFAULT_PULL_TIMEOUT_MILLIS = 1000 * 10L;
     private final String innerProducerGroupName;
     private final String innerConsumerGroupName;
 
@@ -588,7 +587,20 @@ public class EscapeBridge {
 
     protected MessageExt getMessageFromRemote(String topic, long offset, int queueId, String brokerName) {
         try {
-            PullResult pullResult = innerConsumer.pull(new MessageQueue(topic, brokerName, queueId), "*", offset, 1);
+            String brokerAddr = this.findBrokerAddressInSubscribe(brokerName, MixAll.MASTER_ID, false);
+            if (null == brokerAddr) {
+                this.updateTopicRouteInfoFromNameServer(topic);
+                brokerAddr = this.findBrokerAddressInSubscribe(brokerName, MixAll.MASTER_ID, false);
+
+                if (null == brokerAddr) {
+                    LOG.warn("can't find broker address for topic {}", topic);
+                    return null;
+                }
+            }
+
+            PullResult pullResult = this.brokerController.getBrokerOuterAPI().pullMessageFromSpecificBroker(brokerName,
+                    brokerAddr, this.innerConsumerGroupName, topic, queueId, offset, 1, DEFAULT_PULL_TIMEOUT_MILLIS);
+
             if (pullResult.getPullStatus().equals(PullStatus.FOUND)) {
                 return pullResult.getMsgFoundList().get(0);
             }
@@ -597,5 +609,38 @@ public class EscapeBridge {
         }
 
         return null;
+    }
+
+    private String findBrokerAddressInSubscribe(
+            final String brokerName,
+            final long brokerId,
+            final boolean onlyThisBroker
+    ) {
+        if (brokerName == null) {
+            return null;
+        }
+        String brokerAddr = null;
+        boolean found = false;
+
+        Map<Long/* brokerId */, String/* address */> map = this.brokerAddrTable.get(brokerName);
+        if (map != null && !map.isEmpty()) {
+            brokerAddr = map.get(brokerId);
+            boolean slave = brokerId != MixAll.MASTER_ID;
+            found = brokerAddr != null;
+
+            if (!found && slave) {
+                brokerAddr = map.get(brokerId + 1);
+                found = brokerAddr != null;
+            }
+
+            if (!found && !onlyThisBroker) {
+                Map.Entry<Long, String> entry = map.entrySet().iterator().next();
+                brokerAddr = entry.getValue();
+                found = true;
+            }
+        }
+
+        return brokerAddr;
+
     }
 }

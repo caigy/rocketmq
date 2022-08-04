@@ -27,9 +27,13 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.broker.latency.BrokerFixedThreadPoolExecutor;
+import org.apache.rocketmq.client.consumer.PullResult;
+import org.apache.rocketmq.client.consumer.PullStatus;
 import org.apache.rocketmq.client.exception.MQBrokerException;
+import org.apache.rocketmq.client.impl.consumer.PullResultExt;
 import org.apache.rocketmq.client.producer.SendResult;
 import org.apache.rocketmq.client.producer.SendStatus;
 import org.apache.rocketmq.common.AbstractBrokerRunnable;
@@ -43,7 +47,9 @@ import org.apache.rocketmq.common.ThreadFactoryImpl;
 import org.apache.rocketmq.common.UnlockCallback;
 import org.apache.rocketmq.common.UtilAll;
 import org.apache.rocketmq.common.constant.LoggerName;
+import org.apache.rocketmq.common.filter.ExpressionType;
 import org.apache.rocketmq.common.message.Message;
+import org.apache.rocketmq.common.message.MessageAccessor;
 import org.apache.rocketmq.common.message.MessageBatch;
 import org.apache.rocketmq.common.message.MessageClientIDSetter;
 import org.apache.rocketmq.common.message.MessageConst;
@@ -76,6 +82,8 @@ import org.apache.rocketmq.common.protocol.header.GetMaxOffsetRequestHeader;
 import org.apache.rocketmq.common.protocol.header.GetMaxOffsetResponseHeader;
 import org.apache.rocketmq.common.protocol.header.GetMinOffsetRequestHeader;
 import org.apache.rocketmq.common.protocol.header.GetMinOffsetResponseHeader;
+import org.apache.rocketmq.common.protocol.header.PullMessageRequestHeader;
+import org.apache.rocketmq.common.protocol.header.PullMessageResponseHeader;
 import org.apache.rocketmq.common.protocol.header.SendMessageRequestHeader;
 import org.apache.rocketmq.common.protocol.header.SendMessageRequestHeaderV2;
 import org.apache.rocketmq.common.protocol.header.SendMessageResponseHeader;
@@ -92,11 +100,14 @@ import org.apache.rocketmq.common.protocol.header.namesrv.controller.RegisterBro
 import org.apache.rocketmq.common.protocol.header.namesrv.controller.GetMetaDataResponseHeader;
 import org.apache.rocketmq.common.protocol.header.namesrv.controller.GetReplicaInfoRequestHeader;
 import org.apache.rocketmq.common.protocol.header.namesrv.controller.GetReplicaInfoResponseHeader;
+import org.apache.rocketmq.common.protocol.heartbeat.SubscriptionData;
 import org.apache.rocketmq.common.protocol.route.BrokerData;
 import org.apache.rocketmq.common.protocol.route.TopicRouteData;
 import org.apache.rocketmq.common.rpc.ClientMetadata;
 import org.apache.rocketmq.common.rpc.RpcClient;
 import org.apache.rocketmq.common.rpc.RpcClientImpl;
+import org.apache.rocketmq.common.sysflag.MessageSysFlag;
+import org.apache.rocketmq.common.sysflag.PullSysFlag;
 import org.apache.rocketmq.common.topic.TopicValidator;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.logging.InternalLoggerFactory;
@@ -1200,5 +1211,124 @@ public class BrokerOuterAPI {
             }
         });
     }
+
+    public PullResult pullMessageFromSpecificBroker(String brokerName, String brokerAddr,
+                                                    String consumerGroup, String topic, int queueId, long offset,
+                                                    int maxNums,
+                                                    long timeoutMillis) throws MQBrokerException, RemotingException, InterruptedException {
+
+        PullMessageRequestHeader requestHeader = new PullMessageRequestHeader();
+        requestHeader.setConsumerGroup(consumerGroup);
+        requestHeader.setTopic(topic);
+        requestHeader.setQueueId(queueId);
+        requestHeader.setQueueOffset(offset);
+        requestHeader.setMaxMsgNums(maxNums);
+        requestHeader.setSysFlag(PullSysFlag.buildSysFlag(false, false, true, false));
+        requestHeader.setCommitOffset(0L);
+        requestHeader.setSuspendTimeoutMillis(10_0000L);
+        requestHeader.setSubscription(SubscriptionData.SUB_ALL);
+        requestHeader.setSubVersion(System.currentTimeMillis());
+        requestHeader.setMaxMsgBytes(Integer.MAX_VALUE);
+        requestHeader.setExpressionType(ExpressionType.TAG);
+        requestHeader.setBname(brokerName);
+
+        RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.PULL_MESSAGE, requestHeader);
+        RemotingCommand response = this.remotingClient.invokeSync(brokerAddr, request, timeoutMillis);
+        PullResultExt pullResultExt = this.processPullResponse(response, brokerAddr);
+        this.processPullResult(pullResultExt, brokerName, queueId);
+        return pullResultExt;
+    }
+
+    private PullResultExt processPullResponse(
+            final RemotingCommand response,
+            final String addr) throws MQBrokerException, RemotingCommandException {
+        PullStatus pullStatus = PullStatus.NO_NEW_MSG;
+        switch (response.getCode()) {
+            case ResponseCode.SUCCESS:
+                pullStatus = PullStatus.FOUND;
+                break;
+            case ResponseCode.PULL_NOT_FOUND:
+                pullStatus = PullStatus.NO_NEW_MSG;
+                break;
+            case ResponseCode.PULL_RETRY_IMMEDIATELY:
+                pullStatus = PullStatus.NO_MATCHED_MSG;
+                break;
+            case ResponseCode.PULL_OFFSET_MOVED:
+                pullStatus = PullStatus.OFFSET_ILLEGAL;
+                break;
+
+            default:
+                throw new MQBrokerException(response.getCode(), response.getRemark(), addr);
+        }
+
+        PullMessageResponseHeader responseHeader =
+                (PullMessageResponseHeader) response.decodeCommandCustomHeader(PullMessageResponseHeader.class);
+
+        return new PullResultExt(pullStatus, responseHeader.getNextBeginOffset(), responseHeader.getMinOffset(),
+                responseHeader.getMaxOffset(), null, responseHeader.getSuggestWhichBrokerId(), response.getBody(), responseHeader.getOffsetDelta());
+
+    }
+
+    private PullResult processPullResult(final PullResultExt pullResult, String brokerName, int queueId) {
+
+        if (PullStatus.FOUND == pullResult.getPullStatus()) {
+            ByteBuffer byteBuffer = ByteBuffer.wrap(pullResult.getMessageBinary());
+            List<MessageExt> msgList = MessageDecoder.decodesBatch(
+                    byteBuffer,
+                    true,
+                    true,
+                    true
+            );
+//TODO remove
+            boolean needDecodeInnerMessage = false;
+            for (MessageExt messageExt: msgList) {
+                if (MessageSysFlag.check(messageExt.getSysFlag(), MessageSysFlag.INNER_BATCH_FLAG)
+                        && MessageSysFlag.check(messageExt.getSysFlag(), MessageSysFlag.NEED_UNWRAP_FLAG)) {
+                    needDecodeInnerMessage = true;
+                    break;
+                }
+            }
+            if (needDecodeInnerMessage) {
+                List<MessageExt> innerMsgList = new ArrayList<>();
+                try {
+                    for (MessageExt messageExt: msgList) {
+                        if (MessageSysFlag.check(messageExt.getSysFlag(), MessageSysFlag.INNER_BATCH_FLAG)
+                                && MessageSysFlag.check(messageExt.getSysFlag(), MessageSysFlag.NEED_UNWRAP_FLAG)) {
+                            MessageDecoder.decodeMessage(messageExt, innerMsgList);
+                        } else {
+                            innerMsgList.add(messageExt);
+                        }
+                    }
+                    msgList = innerMsgList;
+                } catch (Throwable t) {
+                    LOGGER.error("Try to decode the inner batch failed for {}", pullResult.toString(), t);
+                }
+            }
+
+
+            for (MessageExt msg : msgList) {
+                String traFlag = msg.getProperty(MessageConst.PROPERTY_TRANSACTION_PREPARED);
+                if (Boolean.parseBoolean(traFlag)) {
+                    msg.setTransactionId(msg.getProperty(MessageConst.PROPERTY_UNIQ_CLIENT_MESSAGE_ID_KEYIDX));
+                }
+                MessageAccessor.putProperty(msg, MessageConst.PROPERTY_MIN_OFFSET,
+                        Long.toString(pullResult.getMinOffset()));
+                MessageAccessor.putProperty(msg, MessageConst.PROPERTY_MAX_OFFSET,
+                        Long.toString(pullResult.getMaxOffset()));
+                msg.setBrokerName(brokerName);
+                msg.setQueueId(queueId);
+                if (pullResult.getOffsetDelta() != null) {
+                    msg.setQueueOffset(pullResult.getOffsetDelta() + msg.getQueueOffset());
+                }
+            }
+
+            pullResult.setMsgFoundList(msgList);
+        }
+
+        pullResult.setMessageBinary(null);
+
+        return pullResult;
+    }
+
 
 }
