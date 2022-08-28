@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import org.apache.rocketmq.store.config.BrokerRole;
 
 public class TransactionalMessageServiceImpl implements TransactionalMessageService {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.TRANSACTION_LOGGER_NAME);
@@ -126,6 +127,7 @@ public class TransactionalMessageServiceImpl implements TransactionalMessageServ
     @Override
     public void check(long transactionTimeout, int transactionCheckMax,
         AbstractTransactionalMessageCheckListener listener) {
+        System.out.println("Checking trans..." + this.transactionalMessageBridge.getBrokerController().getBrokerIdentity().getCanonicalName());
         try {
             String topic = TopicValidator.RMQ_SYS_TRANS_HALF_TOPIC;
             Set<MessageQueue> msgQueues = transactionalMessageBridge.fetchMessageQueues(topic);
@@ -134,12 +136,14 @@ public class TransactionalMessageServiceImpl implements TransactionalMessageServ
                 return;
             }
             log.debug("Check topic={}, queues={}", topic, msgQueues);
+            System.out.printf("Check topic=%s, queues=%s\n", topic, msgQueues);
             for (MessageQueue messageQueue : msgQueues) {
                 long startTime = System.currentTimeMillis();
                 MessageQueue opQueue = getOpQueue(messageQueue);
                 long halfOffset = transactionalMessageBridge.fetchConsumeOffset(messageQueue);
                 long opOffset = transactionalMessageBridge.fetchConsumeOffset(opQueue);
                 log.info("Before check, the queue={} msgOffset={} opOffset={}", messageQueue, halfOffset, opOffset);
+                System.out.printf("Before check, the queue=%s msgOffset=%s opOffset=%s\n", messageQueue, halfOffset, opOffset);
                 if (halfOffset < 0 || opOffset < 0) {
                     log.error("MessageQueue: {} illegal offset read: {}, op offset: {},skip this queue", messageQueue,
                         halfOffset, opOffset);
@@ -185,6 +189,22 @@ public class TransactionalMessageServiceImpl implements TransactionalMessageServ
                                 newOffset = i;
                                 continue;
                             }
+                        }
+
+                        if (BrokerRole.SLAVE.equals(this.transactionalMessageBridge.getBrokerController().getMessageStoreConfig().getBrokerRole())
+                            && this.transactionalMessageBridge.getBrokerController().getMinBrokerIdInGroup() == this.transactionalMessageBridge.getBrokerController().getBrokerIdentity().getBrokerId()
+                            ) {
+
+                            System.out.println("Escaping trans msgId=" + msgExt.getMsgId() + ", msgKey=" + msgExt.getKeys()
+                             + ", transProp=" + msgExt.getProperty(MessageConst.PROPERTY_TRANSACTION_ID));
+
+                            final MessageExtBrokerInner msgInner = this.transactionalMessageBridge.renewHalfMessageInner(msgExt);
+                            final boolean isSuccess = this.transactionalMessageBridge.putMessage(msgInner);
+
+                            //TODO retry if failed
+                            newOffset = i + 1;
+                            i++;
+                            continue;
                         }
 
                         if (needDiscard(msgExt, transactionCheckMax) || needSkip(msgExt)) {

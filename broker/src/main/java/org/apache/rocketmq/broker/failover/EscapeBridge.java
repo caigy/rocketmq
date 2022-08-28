@@ -29,6 +29,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.broker.BrokerController;
+import org.apache.rocketmq.broker.transaction.queue.TransactionalMessageUtil;
 import org.apache.rocketmq.client.consumer.PullResult;
 import org.apache.rocketmq.client.consumer.PullStatus;
 import org.apache.rocketmq.client.exception.MQBrokerException;
@@ -38,6 +39,7 @@ import org.apache.rocketmq.client.producer.SendStatus;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.ThreadFactoryImpl;
 import org.apache.rocketmq.common.constant.LoggerName;
+import org.apache.rocketmq.common.message.MessageAccessor;
 import org.apache.rocketmq.common.message.MessageConst;
 import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.message.MessageExt;
@@ -118,9 +120,14 @@ public class EscapeBridge {
                 messageExt.getTopic(), messageExt.getMsgId());
             return null;
         }
+        //todo find topic route for trans msg
 
         final MessageQueue mqSelected = topicPublishInfo.selectOneMessageQueue();
         messageExt.setQueueId(mqSelected.getQueueId());
+        if (TransactionalMessageUtil.buildHalfTopic().equals(messageExt.getTopic())) {
+            MessageAccessor.clearProperty(messageExt, MessageConst.PROPERTY_TRANSACTION_PREPARED_QUEUE_OFFSET);
+        }
+
 
         final String brokerNameToSend = mqSelected.getBrokerName();
         final String brokerAddrToSend = this.brokerController.getTopicRouteInfoManager().findBrokerAddressInPublish(brokerNameToSend);

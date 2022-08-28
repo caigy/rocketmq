@@ -37,6 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.lang3.builder.EqualsBuilder;
 import org.apache.commons.lang3.builder.HashCodeBuilder;
+import org.apache.rocketmq.client.producer.TransactionListener;
 import org.apache.rocketmq.container.BrokerContainer;
 import org.apache.rocketmq.container.InnerSalveBrokerController;
 import org.apache.rocketmq.broker.BrokerController;
@@ -403,6 +404,15 @@ public class ContainerIntegrationTestBase {
         producer.setInstanceName(UUID.randomUUID().toString());
         producer.setNamesrvAddr(nsAddr);
         producer.setTransactionCheckListener(transactionCheckListener);
+        return producer;
+    }
+
+    protected static TransactionMQProducer createTransactionProducer(String producerGroup,
+        TransactionListener transactionListener) {
+        TransactionMQProducer producer = new TransactionMQProducer(producerGroup);
+        producer.setInstanceName(UUID.randomUUID().toString());
+        producer.setNamesrvAddr(nsAddr);
+        producer.setTransactionListener(transactionListener);
         return producer;
     }
 
