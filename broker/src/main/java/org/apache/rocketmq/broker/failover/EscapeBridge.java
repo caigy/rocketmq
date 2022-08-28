@@ -114,20 +114,22 @@ public class EscapeBridge {
     }
 
     private SendResult putMessageToRemoteBroker(MessageExtBrokerInner messageExt) {
-        final TopicPublishInfo topicPublishInfo = this.brokerController.getTopicRouteInfoManager().tryToFindTopicPublishInfo(messageExt.getTopic());
+        final TopicPublishInfo topicPublishInfo = findPublishInfo(messageExt);
         if (null == topicPublishInfo || !topicPublishInfo.ok()) {
             LOG.warn("putMessageToRemoteBroker: no route info of topic {} when escaping message, msgId={}",
                 messageExt.getTopic(), messageExt.getMsgId());
             return null;
         }
-        //todo find topic route for trans msg
 
         final MessageQueue mqSelected = topicPublishInfo.selectOneMessageQueue();
-        messageExt.setQueueId(mqSelected.getQueueId());
-        if (TransactionalMessageUtil.buildHalfTopic().equals(messageExt.getTopic())) {
-            MessageAccessor.clearProperty(messageExt, MessageConst.PROPERTY_TRANSACTION_PREPARED_QUEUE_OFFSET);
-        }
 
+        if (TransactionalMessageUtil.buildHalfTopic().equals(messageExt.getTopic())) {
+            MessageAccessor.putProperty(messageExt, MessageConst.PROPERTY_REAL_QUEUE_ID, String.valueOf(mqSelected.getQueueId()));
+            MessageAccessor.clearProperty(messageExt, MessageConst.PROPERTY_TRANSACTION_PREPARED_QUEUE_OFFSET);
+            messageExt.setPropertiesString(MessageDecoder.messageProperties2String(messageExt.getProperties()));
+        } else {
+            messageExt.setQueueId(mqSelected.getQueueId());
+        }
 
         final String brokerNameToSend = mqSelected.getBrokerName();
         final String brokerAddrToSend = this.brokerController.getTopicRouteInfoManager().findBrokerAddressInPublish(brokerNameToSend);
@@ -154,6 +156,14 @@ public class EscapeBridge {
         }
 
         return null;
+    }
+
+    private TopicPublishInfo findPublishInfo(MessageExtBrokerInner messageExt) {
+        String topicToFind = messageExt.getTopic();
+        if (TransactionalMessageUtil.buildHalfTopic().equals(topicToFind)) {
+            topicToFind = messageExt.getProperty(MessageConst.PROPERTY_REAL_TOPIC);
+        }
+        return this.brokerController.getTopicRouteInfoManager().tryToFindTopicPublishInfo(topicToFind);
     }
 
     public CompletableFuture<PutMessageResult> asyncPutMessage(MessageExtBrokerInner messageExt) {
