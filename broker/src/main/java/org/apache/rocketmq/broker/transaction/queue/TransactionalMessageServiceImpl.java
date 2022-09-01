@@ -52,6 +52,7 @@ public class TransactionalMessageServiceImpl implements TransactionalMessageServ
     private static final int PULL_MSG_RETRY_NUMBER = 1;
 
     private static final int MAX_PROCESS_TIME_LIMIT = 60000;
+    private static final int MAX_RETRY_TIMES_FOR_ESCAPE = 9;
 
     private static final int MAX_RETRY_COUNT_WHEN_HALF_NULL = 1;
 
@@ -162,6 +163,7 @@ public class TransactionalMessageServiceImpl implements TransactionalMessageServ
                 int getMessageNullCount = 1;
                 long newOffset = halfOffset;
                 long i = halfOffset;
+                int escapeFailCnt = 0;
                 while (true) {
                     if (System.currentTimeMillis() - startTime > MAX_PROCESS_TIME_LIMIT) {
                         log.info("Queue={} process time reach max={}", messageQueue, MAX_PROCESS_TIME_LIMIT);
@@ -196,14 +198,26 @@ public class TransactionalMessageServiceImpl implements TransactionalMessageServ
                             ) {
 
                             System.out.println("Escaping trans msgId=" + msgExt.getMsgId() + ", msgKey=" + msgExt.getKeys()
-                             + ", transProp=" + msgExt.getProperty(MessageConst.PROPERTY_TRANSACTION_ID));
+                             + ", transProp=" + msgExt.getUserProperty(MessageConst.PROPERTY_UNIQ_CLIENT_MESSAGE_ID_KEYIDX));
 
                             final MessageExtBrokerInner msgInner = this.transactionalMessageBridge.renewHalfMessageInner(msgExt);
                             final boolean isSuccess = this.transactionalMessageBridge.putMessage(msgInner);
 
                             //TODO retry if failed
-                            newOffset = i + 1;
-                            i++;
+                            if (isSuccess) {
+                                escapeFailCnt = 0;
+                                newOffset = i + 1;
+                                i++;
+                            } else {
+                                log.warn("Escaping transactional message failed {} times! msgId(offsetId)={}, UNIQ_KEY(transactionId)={}",
+                                    escapeFailCnt + 1,
+                                    msgExt.getMsgId(),
+                                    msgExt.getUserProperty(MessageConst.PROPERTY_UNIQ_CLIENT_MESSAGE_ID_KEYIDX));
+                                if (escapeFailCnt <= MAX_RETRY_TIMES_FOR_ESCAPE) {
+                                    Thread.sleep(100L * (2 ^ escapeFailCnt));
+                                    escapeFailCnt++;
+                                }
+                            }
                             continue;
                         }
 
