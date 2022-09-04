@@ -203,7 +203,6 @@ public class TransactionalMessageServiceImpl implements TransactionalMessageServ
                             final MessageExtBrokerInner msgInner = this.transactionalMessageBridge.renewHalfMessageInner(msgExt);
                             final boolean isSuccess = this.transactionalMessageBridge.putMessage(msgInner);
 
-                            //TODO retry if failed
                             if (isSuccess) {
                                 escapeFailCnt = 0;
                                 newOffset = i + 1;
@@ -216,6 +215,10 @@ public class TransactionalMessageServiceImpl implements TransactionalMessageServ
                                 if (escapeFailCnt <= MAX_RETRY_TIMES_FOR_ESCAPE) {
                                     Thread.sleep(100L * (2 ^ escapeFailCnt));
                                     escapeFailCnt++;
+                                } else {
+                                    escapeFailCnt = 0;
+                                    newOffset = i + 1;
+                                    i++;
                                 }
                             }
                             continue;

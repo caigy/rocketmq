@@ -62,7 +62,7 @@ public class TransactionMessageIT extends ContainerIntegrationTestBase {
     }
 
     private static final String TOPIC = TransactionMessageIT.class.getSimpleName() + "_TOPIC";
-    private static final int MESSAGE_COUNT = 2;
+    private static final int MESSAGE_COUNT = 16;
 
     public TransactionMessageIT() {
     }
@@ -166,9 +166,28 @@ public class TransactionMessageIT extends ContainerIntegrationTestBase {
         producer.shutdown();
 
         master1With3Replicas = brokerContainer1.addBroker(master1With3Replicas.getBrokerConfig(), master1With3Replicas.getMessageStoreConfig());
-        master1With3Replicas.start();;
+        master1With3Replicas.start();
         cancelIsolatedBroker(master1With3Replicas);
 
         awaitUntilSlaveOK();
+
+        receivedMsgCount.set(0);
+        DefaultMQPushConsumer pushConsumer2 = createPushConsumer(CONSUME_GROUP);
+        pushConsumer2.subscribe(TOPIC, "*");
+        pushConsumer2.registerMessageListener((MessageListenerConcurrently) (msgs, context) -> {
+            for (MessageExt msg : msgs) {
+                System.out.println("[After master recovered] receive trans msgId=" + msg.getMsgId() + ", transactionId=" + msg.getTransactionId());
+                if (msgSentMap.containsKey(msg.getMsgId())) {
+                    receivedMsgCount.incrementAndGet();
+                }
+            }
+
+            return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
+        });
+        pushConsumer2.start();
+        System.out.println("Wait for checking...");
+        Thread.sleep(10000L);
+        assertThat(receivedMsgCount.get()).isEqualTo(0);
+
     }
 }
