@@ -39,7 +39,6 @@ import org.apache.rocketmq.client.producer.SendStatus;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.ThreadFactoryImpl;
 import org.apache.rocketmq.common.constant.LoggerName;
-import org.apache.rocketmq.common.message.MessageAccessor;
 import org.apache.rocketmq.common.message.MessageConst;
 import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.message.MessageExt;
@@ -93,6 +92,7 @@ public class EscapeBridge {
 
     public PutMessageResult putMessage(MessageExtBrokerInner messageExt) {
         BrokerController masterBroker = this.brokerController.peekMasterBroker();
+        System.out.println("masterBroker=" + masterBroker);
         if (masterBroker != null) {
             return masterBroker.getMessageStore().putMessage(messageExt);
         } else if (this.brokerController.getBrokerConfig().isEnableSlaveActingMaster()
@@ -101,6 +101,7 @@ public class EscapeBridge {
             try {
                 messageExt.setWaitStoreMsgOK(false);
                 final SendResult sendResult = putMessageToRemoteBroker(messageExt);
+                System.out.println("putMessageToRemoteBroker res=" + sendResult);
                 return transformSendResult2PutResult(sendResult);
             } catch (Exception e) {
                 LOG.error("sendMessageInFailover to remote failed", e);
@@ -114,22 +115,22 @@ public class EscapeBridge {
     }
 
     private SendResult putMessageToRemoteBroker(MessageExtBrokerInner messageExt) {
-        final TopicPublishInfo topicPublishInfo = findPublishInfo(messageExt);
+        final boolean isTransHalfMessage = TransactionalMessageUtil.buildHalfTopic().equals(messageExt.getTopic());
+        MessageExtBrokerInner messageToPut = messageExt;
+        if (isTransHalfMessage) {
+            messageToPut = TransactionalMessageUtil.buildTransactionalMessageFromHalfMessage(messageExt);
+        }
+        final TopicPublishInfo topicPublishInfo = this.brokerController.getTopicRouteInfoManager().tryToFindTopicPublishInfo(messageToPut.getTopic());
         if (null == topicPublishInfo || !topicPublishInfo.ok()) {
+            System.out.println("No topic route for " + messageToPut);
             LOG.warn("putMessageToRemoteBroker: no route info of topic {} when escaping message, msgId={}",
-                messageExt.getTopic(), messageExt.getMsgId());
+                messageToPut.getTopic(), messageToPut.getMsgId());
             return null;
         }
 
         final MessageQueue mqSelected = topicPublishInfo.selectOneMessageQueue();
 
-        if (TransactionalMessageUtil.buildHalfTopic().equals(messageExt.getTopic())) {
-            MessageAccessor.putProperty(messageExt, MessageConst.PROPERTY_REAL_QUEUE_ID, String.valueOf(mqSelected.getQueueId()));
-            MessageAccessor.clearProperty(messageExt, MessageConst.PROPERTY_TRANSACTION_PREPARED_QUEUE_OFFSET);
-            messageExt.setPropertiesString(MessageDecoder.messageProperties2String(messageExt.getProperties()));
-        } else {
-            messageExt.setQueueId(mqSelected.getQueueId());
-        }
+        messageToPut.setQueueId(mqSelected.getQueueId());
 
         final String brokerNameToSend = mqSelected.getBrokerName();
         final String brokerAddrToSend = this.brokerController.getTopicRouteInfoManager().findBrokerAddressInPublish(brokerNameToSend);
@@ -138,33 +139,29 @@ public class EscapeBridge {
         try {
             final SendResult sendResult = this.brokerController.getBrokerOuterAPI().sendMessageToSpecificBroker(
                 brokerAddrToSend, brokerNameToSend,
-                messageExt, this.getProducerGroup(messageExt), SEND_TIMEOUT);
+                messageToPut, this.getProducerGroup(messageToPut), SEND_TIMEOUT);
+            System.out.printf("Send to %s, result=%s\n", brokerNameToSend, sendResult);
             if (null != sendResult && SendStatus.SEND_OK.equals(sendResult.getSendStatus())) {
                 return sendResult;
             } else {
                 LOG.error("Escaping failed! cost {}ms, Topic: {}, MsgId: {}, Broker: {}",
-                    System.currentTimeMillis() - beginTimestamp, messageExt.getTopic(),
-                    messageExt.getMsgId(), brokerNameToSend);
+                    System.currentTimeMillis() - beginTimestamp, messageToPut.getTopic(),
+                    messageToPut.getMsgId(), brokerNameToSend);
             }
         } catch (RemotingException | MQBrokerException e) {
+            e.printStackTrace();
             LOG.error(String.format("putMessageToRemoteBroker exception, MsgId: %s, RT: %sms, Broker: %s",
-                messageExt.getMsgId(), System.currentTimeMillis() - beginTimestamp, mqSelected), e);
+                messageToPut.getMsgId(), System.currentTimeMillis() - beginTimestamp, mqSelected), e);
         } catch (InterruptedException e) {
+            e.printStackTrace();
             LOG.error(String.format("putMessageToRemoteBroker interrupted, MsgId: %s, RT: %sms, Broker: %s",
-                messageExt.getMsgId(), System.currentTimeMillis() - beginTimestamp, mqSelected), e);
+                messageToPut.getMsgId(), System.currentTimeMillis() - beginTimestamp, mqSelected), e);
             Thread.currentThread().interrupt();
         }
 
         return null;
     }
 
-    private TopicPublishInfo findPublishInfo(MessageExtBrokerInner messageExt) {
-        String topicToFind = messageExt.getTopic();
-        if (TransactionalMessageUtil.buildHalfTopic().equals(topicToFind)) {
-            topicToFind = messageExt.getProperty(MessageConst.PROPERTY_REAL_TOPIC);
-        }
-        return this.brokerController.getTopicRouteInfoManager().tryToFindTopicPublishInfo(topicToFind);
-    }
 
     public CompletableFuture<PutMessageResult> asyncPutMessage(MessageExtBrokerInner messageExt) {
         BrokerController masterBroker = this.brokerController.peekMasterBroker();

@@ -51,7 +51,7 @@ public class TransactionMessageIT extends ContainerIntegrationTestBase {
 
     private static final String CONSUME_GROUP = TransactionMessageIT.class.getSimpleName() + "_Consumer";
     private static final String PRODUCER_GROUP = TransactionMessageIT.class.getSimpleName() + "_PRODUCER";
-    private static final String MESSAGE_STRING = RandomStringUtils.random(1024);
+    private static final String MESSAGE_STRING = RandomStringUtils.random(4);
     private static byte[] MESSAGE_BODY;
 
     static {
@@ -94,7 +94,7 @@ public class TransactionMessageIT extends ContainerIntegrationTestBase {
 
         for (int i = 0; i < MESSAGE_COUNT; i++) {
             Message msg = new Message(TOPIC, MESSAGE_BODY);
-            TransactionSendResult result = producer.sendMessageInTransaction(msg, null);//.sendMessageInTransaction(msg, new TransactionExecutorImpl(), null);
+            TransactionSendResult result = producer.sendMessageInTransaction(msg, null);
             assertThat(result.getLocalTransactionState()).isEqualTo(LocalTransactionState.COMMIT_MESSAGE);
         }
 
@@ -110,7 +110,7 @@ public class TransactionMessageIT extends ContainerIntegrationTestBase {
 
 
     @Test
-    public void consumeTransactionMsgFromSlave() throws Exception {
+    public void consumeTransactionMsgLocalEscape() throws Exception {
         DefaultMQPushConsumer pushConsumer = createPushConsumer(CONSUME_GROUP);
         pushConsumer.subscribe(TOPIC, "*");
         AtomicInteger receivedMsgCount = new AtomicInteger(0);
@@ -153,7 +153,7 @@ public class TransactionMessageIT extends ContainerIntegrationTestBase {
             master1With3Replicas.getBrokerIdentity().getBrokerId()));
         createTopicTo(master2With3Replicas, TOPIC, 1, 1);
 
-        transactionCheckListener.setShouldCommitUnknownState(false);
+        transactionCheckListener.setShouldReturnUnknownState(false);
         producer.getDefaultMQProducerImpl().getmQClientFactory().updateTopicRouteInfoFromNameServer(TOPIC);
 
         System.out.printf("Wait for consuming%n");
@@ -188,6 +188,104 @@ public class TransactionMessageIT extends ContainerIntegrationTestBase {
         System.out.println("Wait for checking...");
         Thread.sleep(10000L);
         assertThat(receivedMsgCount.get()).isEqualTo(0);
+        pushConsumer2.shutdown();
+
+    }
+
+
+    @Test
+    public void consumeTransactionMsgRemoteEscape() throws Exception {
+        DefaultMQPushConsumer pushConsumer = createPushConsumer(CONSUME_GROUP);
+        pushConsumer.subscribe(TOPIC, "*");
+        AtomicInteger receivedMsgCount = new AtomicInteger(0);
+        Map<String, Message> msgSentMap = new HashMap<>();
+        pushConsumer.registerMessageListener((MessageListenerConcurrently) (msgs, context) -> {
+            for (MessageExt msg : msgs) {
+                System.out.println("receive trans msgId=" + msg.getMsgId() + ", transactionId=" + msg.getTransactionId());
+                if (msgSentMap.containsKey(msg.getMsgId())) {
+                    receivedMsgCount.incrementAndGet();
+                }
+            }
+
+            return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
+        });
+        pushConsumer.start();
+
+        List<SendResult> results = new ArrayList<>();
+
+
+        TransactionListenerImpl transactionCheckListener = new TransactionListenerImpl(true);
+        TransactionMQProducer producer = createTransactionProducer(PRODUCER_GROUP, transactionCheckListener);
+        producer.start();
+
+        for (int i = 0; i < MESSAGE_COUNT; i++) {
+            Message msg = new Message(TOPIC, MESSAGE_BODY);
+            msg.setKeys(UUID.randomUUID().toString());
+            MessageAccessor.putProperty(msg, MessageConst.PROPERTY_TRANSACTION_PREPARED, "true");
+            MessageAccessor.putProperty(msg, MessageConst.PROPERTY_PRODUCER_GROUP, PRODUCER_GROUP);
+            SendResult result = producer.sendMessageInTransaction(msg, null);
+            String msgId = result.getMsgId();
+            System.out.println("Sent trans msgid=" + msgId + ", transactionId=" + result.getTransactionId() + ", key=" + msg.getKeys());
+            results.add(result);
+
+            msgSentMap.put(msgId, msg);
+        }
+
+        isolateBroker(master1With3Replicas);
+        brokerContainer1.removeBroker(new BrokerIdentity(master1With3Replicas.getBrokerIdentity().getBrokerClusterName(),
+            master1With3Replicas.getBrokerIdentity().getBrokerName(),
+            master1With3Replicas.getBrokerIdentity().getBrokerId()));
+        createTopicTo(master2With3Replicas, TOPIC, 1, 1);
+        createTopicTo(master3With3Replicas, TOPIC, 1, 1);
+        //isolateBroker(master2With3Replicas);
+        brokerContainer2.removeBroker(new BrokerIdentity(master2With3Replicas.getBrokerIdentity().getBrokerClusterName(),
+            master2With3Replicas.getBrokerIdentity().getBrokerName(),
+            master2With3Replicas.getBrokerIdentity().getBrokerId()));
+        System.out.println(master2With3Replicas.getBrokerIdentity().getBrokerClusterName() + "-"
+            + master2With3Replicas.getBrokerIdentity().getBrokerName()
+        +"_" + master2With3Replicas.getBrokerIdentity().getBrokerId() + " removed");
+
+        transactionCheckListener.setShouldReturnUnknownState(false);
+        producer.getDefaultMQProducerImpl().getmQClientFactory().updateTopicRouteInfoFromNameServer(TOPIC);
+
+        System.out.printf("Wait for consuming%n");
+
+        await().atMost(Duration.ofSeconds(180)).until(() -> receivedMsgCount.get() >= MESSAGE_COUNT);
+
+        System.out.printf("consumer received %d msg%n", receivedMsgCount.get());
+
+        pushConsumer.shutdown();
+        producer.shutdown();
+
+        master1With3Replicas = brokerContainer1.addBroker(master1With3Replicas.getBrokerConfig(), master1With3Replicas.getMessageStoreConfig());
+        master1With3Replicas.start();
+        cancelIsolatedBroker(master1With3Replicas);
+
+        master2With3Replicas = brokerContainer2.addBroker(master2With3Replicas.getBrokerConfig(),
+            master2With3Replicas.getMessageStoreConfig());
+        master2With3Replicas.start();
+        cancelIsolatedBroker(master2With3Replicas);
+
+        awaitUntilSlaveOK();
+
+        receivedMsgCount.set(0);
+        DefaultMQPushConsumer pushConsumer2 = createPushConsumer(CONSUME_GROUP);
+        pushConsumer2.subscribe(TOPIC, "*");
+        pushConsumer2.registerMessageListener((MessageListenerConcurrently) (msgs, context) -> {
+            for (MessageExt msg : msgs) {
+                System.out.println("[After master recovered] receive trans msgId=" + msg.getMsgId() + ", transactionId=" + msg.getTransactionId());
+                if (msgSentMap.containsKey(msg.getMsgId())) {
+                    receivedMsgCount.incrementAndGet();
+                }
+            }
+
+            return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
+        });
+        pushConsumer2.start();
+        System.out.println("Wait for checking...");
+        Thread.sleep(10000L);
+        assertThat(receivedMsgCount.get()).isEqualTo(0);
+        pushConsumer2.shutdown();
 
     }
 }

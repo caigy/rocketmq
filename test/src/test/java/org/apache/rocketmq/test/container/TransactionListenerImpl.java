@@ -23,21 +23,21 @@ import org.apache.rocketmq.common.message.Message;
 import org.apache.rocketmq.common.message.MessageExt;
 
 public class TransactionListenerImpl implements TransactionListener {
-    private boolean shouldCommitUnknownState = false;
+    private boolean shouldReturnUnknownState = false;
 
 
 
-    public TransactionListenerImpl(boolean shouldCommitUnknownState) {
-        this.shouldCommitUnknownState = shouldCommitUnknownState;
+    public TransactionListenerImpl(boolean shouldReturnUnknownState) {
+        this.shouldReturnUnknownState = shouldReturnUnknownState;
     }
 
-    public void setShouldCommitUnknownState(boolean shouldCommitUnknownState) {
-        this.shouldCommitUnknownState = shouldCommitUnknownState;
+    public void setShouldReturnUnknownState(boolean shouldReturnUnknownState) {
+        this.shouldReturnUnknownState = shouldReturnUnknownState;
     }
 
     @Override
     public LocalTransactionState executeLocalTransaction(Message msg, Object arg) {
-        if (shouldCommitUnknownState) {
+        if (shouldReturnUnknownState) {
             return LocalTransactionState.UNKNOW;
         } else {
             return LocalTransactionState.COMMIT_MESSAGE;
@@ -46,7 +46,7 @@ public class TransactionListenerImpl implements TransactionListener {
 
     @Override
     public LocalTransactionState checkLocalTransaction(MessageExt msg) {
-        if (shouldCommitUnknownState) {
+        if (shouldReturnUnknownState) {
             return LocalTransactionState.UNKNOW;
         } else {
             return LocalTransactionState.COMMIT_MESSAGE;

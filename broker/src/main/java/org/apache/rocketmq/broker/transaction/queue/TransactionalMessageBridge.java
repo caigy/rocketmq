@@ -228,6 +228,7 @@ public class TransactionalMessageBridge {
 
     public boolean putMessage(MessageExtBrokerInner messageInner) {
         PutMessageResult putMessageResult = this.brokerController.getEscapeBridge().putMessage(messageInner);
+        System.out.println("put msg " + messageInner.getTransactionId() + ": " + putMessageResult);
         if (putMessageResult != null
             && putMessageResult.getPutMessageStatus() == PutMessageStatus.PUT_OK) {
             return true;

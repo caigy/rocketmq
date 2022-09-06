@@ -103,6 +103,7 @@ public class TopicRouteInfoManager {
                     final TopicRouteData topicRouteData = this.brokerController.getBrokerOuterAPI()
                         .getTopicRouteInfoFromNameServer(topic, GET_TOPIC_ROUTE_TIMEOUT);
                     if (null == topicRouteData) {
+                        System.out.println("topicRouteData is null!");
                         log.warn("TopicRouteInfoManager: updateTopicRouteInfoFromNameServer, getTopicRouteInfoFromNameServer return null, Topic: {}.", topic);
                         return;
                     }
@@ -115,8 +116,10 @@ public class TopicRouteInfoManager {
                         this.updateTopicRouteTable(topic, topicRouteData);
                     }
                 } catch (RemotingException e) {
+                    e.printStackTrace();
                     log.error("updateTopicRouteInfoFromNameServer Exception", e);
                 } catch (MQBrokerException e) {
+                    e.printStackTrace();
                     log.error("updateTopicRouteInfoFromNameServer Exception", e);
                     if (!NamespaceUtil.isRetryTopic(topic)
                         && ResponseCode.TOPIC_NOT_EXIST == e.getResponseCode()) {
@@ -129,6 +132,7 @@ public class TopicRouteInfoManager {
             }
         } catch (InterruptedException e) {
             log.warn("updateTopicRouteInfoFromNameServer Exception", e);
+            e.printStackTrace();
         }
     }
 
