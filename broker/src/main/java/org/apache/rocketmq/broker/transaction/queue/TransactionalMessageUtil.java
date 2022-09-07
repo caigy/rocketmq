@@ -16,6 +16,7 @@
  */
 package org.apache.rocketmq.broker.transaction.queue;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.rocketmq.common.MixAll;
 import org.apache.rocketmq.common.message.MessageAccessor;
 import org.apache.rocketmq.common.message.MessageConst;
@@ -46,27 +47,30 @@ public class TransactionalMessageUtil {
 
     public static MessageExtBrokerInner buildTransactionalMessageFromHalfMessage(MessageExt msgExt) {
         final MessageExtBrokerInner msgInner = new MessageExtBrokerInner();
+        msgInner.setWaitStoreMsgOK(false);
         msgInner.setMsgId(msgExt.getMsgId());
         msgInner.setTopic(msgExt.getProperty(MessageConst.PROPERTY_REAL_TOPIC));
         msgInner.setBody(msgExt.getBody());
-        msgInner.setQueueId(Integer.parseInt(msgExt.getProperty(MessageConst.PROPERTY_REAL_QUEUE_ID)));
+        final String realQueueIdStr = msgExt.getProperty(MessageConst.PROPERTY_REAL_QUEUE_ID);
+        if (StringUtils.isNumeric(realQueueIdStr)) {
+            msgInner.setQueueId(Integer.parseInt(realQueueIdStr));
+        }
         msgInner.setFlag(msgExt.getFlag());
         msgInner.setTagsCode(MessageExtBrokerInner.tagsString2tagsCode(msgInner.getTags()));
         msgInner.setBornTimestamp(msgExt.getBornTimestamp());
         msgInner.setBornHost(msgExt.getBornHost());
-        msgInner.setStoreHost(msgExt.getStoreHost());
+        msgInner.setTransactionId(msgExt.getProperty(MessageConst.PROPERTY_UNIQ_CLIENT_MESSAGE_ID_KEYIDX));
 
-        msgInner.setTransactionId(msgExt.getUserProperty(MessageConst.PROPERTY_UNIQ_CLIENT_MESSAGE_ID_KEYIDX));
+        MessageAccessor.setProperties(msgInner, msgExt.getProperties());
         MessageAccessor.putProperty(msgInner, MessageConst.PROPERTY_TRANSACTION_PREPARED, "true");
+        MessageAccessor.clearProperty(msgInner, MessageConst.PROPERTY_TRANSACTION_PREPARED_QUEUE_OFFSET);
+        MessageAccessor.clearProperty(msgInner, MessageConst.PROPERTY_REAL_QUEUE_ID);
+        msgInner.setPropertiesString(MessageDecoder.messageProperties2String(msgInner.getProperties()));
+
         int sysFlag = msgExt.getSysFlag();
         sysFlag |= MessageSysFlag.TRANSACTION_PREPARED_TYPE;
         msgInner.setSysFlag(sysFlag);
 
-        MessageAccessor.clearProperty(msgInner, MessageConst.PROPERTY_TRANSACTION_PREPARED_QUEUE_OFFSET);
-        MessageAccessor.clearProperty(msgInner, MessageConst.PROPERTY_REAL_QUEUE_ID);
-        MessageAccessor.setProperties(msgInner, msgExt.getProperties());
-        msgInner.setPropertiesString(MessageDecoder.messageProperties2String(msgExt.getProperties()));
-        msgInner.setWaitStoreMsgOK(false);
         return msgInner;
     }
 }
