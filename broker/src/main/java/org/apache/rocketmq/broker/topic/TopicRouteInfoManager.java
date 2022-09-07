@@ -115,8 +115,10 @@ public class TopicRouteInfoManager {
                         this.updateTopicRouteTable(topic, topicRouteData);
                     }
                 } catch (RemotingException e) {
+                    e.printStackTrace();
                     log.error("updateTopicRouteInfoFromNameServer Exception", e);
                 } catch (MQBrokerException e) {
+                    e.printStackTrace();
                     log.error("updateTopicRouteInfoFromNameServer Exception", e);
                     if (!NamespaceUtil.isRetryTopic(topic)
                         && ResponseCode.TOPIC_NOT_EXIST == e.getResponseCode()) {
@@ -129,6 +131,7 @@ public class TopicRouteInfoManager {
             }
         } catch (InterruptedException e) {
             log.warn("updateTopicRouteInfoFromNameServer Exception", e);
+            e.printStackTrace();
         }
     }
 

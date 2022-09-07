@@ -62,6 +62,7 @@ public abstract class AbstractTransactionalMessageCheckListener {
         String groupId = msgExt.getProperty(MessageConst.PROPERTY_PRODUCER_GROUP);
         Channel channel = brokerController.getProducerManager().getAvailableChannel(groupId);
         if (channel != null) {
+            System.out.println("----> send check request=" + checkTransactionStateRequestHeader);
             brokerController.getBroker2Client().checkProducerTransactionState(groupId, channel, checkTransactionStateRequestHeader, msgExt);
         } else {
             LOGGER.warn("Check transaction failed, channel is null. groupId={}", groupId);

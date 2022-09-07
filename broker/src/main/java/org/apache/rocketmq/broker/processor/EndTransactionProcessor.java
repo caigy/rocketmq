@@ -133,7 +133,9 @@ public class EndTransactionProcessor implements NettyRequestProcessor {
                     msgInner.setPreparedTransactionOffset(requestHeader.getCommitLogOffset());
                     msgInner.setStoreTimestamp(result.getPrepareMessage().getStoreTimestamp());
                     MessageAccessor.clearProperty(msgInner, MessageConst.PROPERTY_TRANSACTION_PREPARED);
+                    System.out.println("final msg=" + msgInner);
                     RemotingCommand sendResult = sendFinalMessage(msgInner);
+                    System.out.println("final msg sendResult=" + sendResult);
                     if (sendResult.getCode() == ResponseCode.SUCCESS) {
                         this.brokerController.getTransactionalMessageService().deletePrepareMessage(result.getPrepareMessage());
                     }
