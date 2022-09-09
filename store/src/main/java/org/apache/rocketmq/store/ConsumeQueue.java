@@ -564,6 +564,8 @@ public class ConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCycle {
                 // XXX: warn and notify me
                 log.warn("[BUG]put commit log position info to " + topic + ":" + queueId + " " + request.getCommitLogOffset()
                     + " failed, retry " + i + " times");
+                System.out.println("[BUG]put commit log position info to " + topic + ":" + queueId + " " + request.getCommitLogOffset()
+                    + " failed, retry " + i + " times");
 
                 try {
                     Thread.sleep(1000);
@@ -575,6 +577,7 @@ public class ConsumeQueue implements ConsumeQueueInterface, FileQueueLifeCycle {
 
         // XXX: warn and notify me
         log.error("[BUG]consume queue can not write, {} {}", this.topic, this.queueId);
+        System.out.printf("[BUG]consume queue can not write, {} {}\n", this.topic, this.queueId);
         this.messageStore.getRunningFlags().makeLogicsQueueError();
     }
 

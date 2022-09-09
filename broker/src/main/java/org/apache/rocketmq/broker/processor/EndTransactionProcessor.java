@@ -124,8 +124,10 @@ public class EndTransactionProcessor implements NettyRequestProcessor {
         OperationResult result = new OperationResult();
         if (MessageSysFlag.TRANSACTION_COMMIT_TYPE == requestHeader.getCommitOrRollback()) {
             result = this.brokerController.getTransactionalMessageService().commitMessage(requestHeader);
+            System.out.println(this.brokerController.getBrokerIdentity().getCanonicalName() + " COMMIT result=" + result);
             if (result.getResponseCode() == ResponseCode.SUCCESS) {
                 RemotingCommand res = checkPrepareMessage(result.getPrepareMessage(), requestHeader);
+                System.out.println(this.brokerController.getBrokerIdentity().getCanonicalName() + " COMMIT chk prepare result=" + res);
                 if (res.getCode() == ResponseCode.SUCCESS) {
                     MessageExtBrokerInner msgInner = endMessageTransaction(result.getPrepareMessage());
                     msgInner.setSysFlag(MessageSysFlag.resetTransactionValue(msgInner.getSysFlag(), requestHeader.getCommitOrRollback()));

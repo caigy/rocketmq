@@ -1710,6 +1710,8 @@ public class DefaultMessageStore implements MessageStore {
 
     public void doDispatch(DispatchRequest req) {
         for (CommitLogDispatcher dispatcher : this.dispatcherList) {
+            System.out.println(this.brokerConfig.getBrokerName() +"-"+ this.brokerConfig.getBrokerId()
+            + ": do dipatch " + req);
             dispatcher.dispatch(req);
         }
     }
@@ -1863,6 +1865,7 @@ public class DefaultMessageStore implements MessageStore {
         @Override
         public void dispatch(DispatchRequest request) {
             final int tranType = MessageSysFlag.getTransactionValue(request.getSysFlag());
+            System.out.println("tranType=" + tranType);
             switch (tranType) {
                 case MessageSysFlag.TRANSACTION_NOT_TYPE:
                 case MessageSysFlag.TRANSACTION_COMMIT_TYPE:
@@ -2454,17 +2457,20 @@ public class DefaultMessageStore implements MessageStore {
                 this.reputFromOffset = DefaultMessageStore.this.commitLog.getMinOffset();
             }
             for (boolean doNext = true; this.isCommitLogAvailable() && doNext; ) {
-
+                System.out.println(DefaultMessageStore.this.brokerConfig.getBrokerName() + "-" + DefaultMessageStore.this.brokerConfig.getBrokerId()
+                    + ": do reput from " + this.reputFromOffset);
                 SelectMappedBufferResult result = DefaultMessageStore.this.commitLog.getData(reputFromOffset);
                 if (result != null) {
                     try {
                         this.reputFromOffset = result.getStartOffset();
-
+                        System.out.println(DefaultMessageStore.this.brokerConfig.getBrokerName() + "-" + DefaultMessageStore.this.brokerConfig.getBrokerId()
+                            + ": confirm offset=" + DefaultMessageStore.this.getConfirmOffset());
                         for (int readSize = 0; readSize < result.getSize() && reputFromOffset < DefaultMessageStore.this.getConfirmOffset() && doNext; ) {
                             DispatchRequest dispatchRequest =
                                 DefaultMessageStore.this.commitLog.checkMessageAndReturnSize(result.getByteBuffer(), false, false, false);
                             int size = dispatchRequest.getBufferSize() == -1 ? dispatchRequest.getMsgSize() : dispatchRequest.getBufferSize();
-
+                            System.out.println(DefaultMessageStore.this.brokerConfig.getBrokerName() + "-" + DefaultMessageStore.this.brokerConfig.getBrokerId()
+                                + ": dispatchRequest=" + dispatchRequest);
                             if (reputFromOffset + size > DefaultMessageStore.this.getConfirmOffset()) {
                                 doNext = false;
                                 break;

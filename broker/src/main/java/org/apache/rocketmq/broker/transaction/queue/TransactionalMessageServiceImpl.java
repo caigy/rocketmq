@@ -137,7 +137,8 @@ public class TransactionalMessageServiceImpl implements TransactionalMessageServ
                 return;
             }
             log.debug("Check topic={}, queues={}", topic, msgQueues);
-            System.out.printf("Check topic=%s, queues=%s\n", topic, msgQueues);
+            System.out.printf(this.transactionalMessageBridge.getBrokerController().getBrokerIdentity()
+                + ": Check topic=%s, queues=%s\n", topic, msgQueues);
             for (MessageQueue messageQueue : msgQueues) {
                 long startTime = System.currentTimeMillis();
                 MessageQueue opQueue = getOpQueue(messageQueue);
@@ -286,7 +287,11 @@ public class TransactionalMessageServiceImpl implements TransactionalMessageServ
                 }
             }
         } catch (Throwable e) {
+            e.printStackTrace();
             log.error("Check error", e);
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
         }
 
     }

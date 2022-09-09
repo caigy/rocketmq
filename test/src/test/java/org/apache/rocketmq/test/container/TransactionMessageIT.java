@@ -49,7 +49,7 @@ public class TransactionMessageIT extends ContainerIntegrationTestBase {
 
     //    private static final String CONSUME_GROUP = TransactionMessageIT.class.getSimpleName() + "_Consumer";
 //    private static final String PRODUCER_GROUP = TransactionMessageIT.class.getSimpleName() + "_PRODUCER";
-    private static final String MESSAGE_STRING = RandomStringUtils.random(4);
+    private static final String MESSAGE_STRING = RandomStringUtils.random(1);
     private static byte[] MESSAGE_BODY;
 
     static {
@@ -253,7 +253,7 @@ public class TransactionMessageIT extends ContainerIntegrationTestBase {
             + master2With3Replicas.getBrokerIdentity().getBrokerName()
             + "-" + master2With3Replicas.getBrokerIdentity().getBrokerId() + " removed");
 
-        pushConsumer.getDefaultMQPushConsumerImpl().getmQClientFactory().updateTopicRouteInfoFromNameServer(topic);
+        pushConsumer.getDefaultMQPushConsumerImpl().getRebalanceImpl().doRebalance(false);
         transactionCheckListener.setShouldReturnUnknownState(false);
         producer.getDefaultMQProducerImpl().getmQClientFactory().updateTopicRouteInfoFromNameServer(topic);
 

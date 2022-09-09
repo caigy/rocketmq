@@ -1954,6 +1954,7 @@ public class BrokerController {
 
     private synchronized void changeTransactionCheckServiceStatus(boolean shouldStart) {
         if (isTransactionCheckServiceStart != shouldStart) {
+            System.out.println(this.getBrokerIdentity().getCanonicalName() + ": TransactionCheckService status changed from " + isTransactionCheckServiceStart + " to " + shouldStart);
             LOG.info("TransactionCheckService status changed to {}", shouldStart);
             if (shouldStart) {
                 this.transactionalMessageCheckService.start();
