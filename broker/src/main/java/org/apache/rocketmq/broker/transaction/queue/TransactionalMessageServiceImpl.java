@@ -200,7 +200,7 @@ public class TransactionalMessageServiceImpl implements TransactionalMessageServ
                             && this.transactionalMessageBridge.getBrokerController().getBrokerConfig().isEnableSlaveActingMaster()
                         ) {
                             final MessageExtBrokerInner msgInner = this.transactionalMessageBridge.renewHalfMessageInner(msgExt);
-                            final boolean isSuccess = this.transactionalMessageBridge.putMessage(msgInner);
+                            final boolean isSuccess = this.transactionalMessageBridge.escapeMessage(msgInner);
 
                             if (isSuccess) {
                                 escapeFailCnt = 0;

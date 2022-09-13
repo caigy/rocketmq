@@ -36,8 +36,6 @@ import org.apache.rocketmq.client.producer.TransactionMQProducer;
 import org.apache.rocketmq.client.producer.TransactionSendResult;
 import org.apache.rocketmq.common.BrokerIdentity;
 import org.apache.rocketmq.common.message.Message;
-import org.apache.rocketmq.common.message.MessageAccessor;
-import org.apache.rocketmq.common.message.MessageConst;
 import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.remoting.common.RemotingHelper;
 import org.junit.Test;
@@ -47,8 +45,6 @@ import static org.awaitility.Awaitility.await;
 
 public class TransactionMessageIT extends ContainerIntegrationTestBase {
 
-    //    private static final String CONSUME_GROUP = TransactionMessageIT.class.getSimpleName() + "_Consumer";
-//    private static final String PRODUCER_GROUP = TransactionMessageIT.class.getSimpleName() + "_PRODUCER";
     private static final String MESSAGE_STRING = RandomStringUtils.random(1);
     private static byte[] MESSAGE_BODY;
 
@@ -189,8 +185,7 @@ public class TransactionMessageIT extends ContainerIntegrationTestBase {
         pushConsumer2.start();
         System.out.println("Wait for checking...");
         Thread.sleep(10000L);
-        assertThat(receivedMsgCount.get()).isEqualTo(0);
-        pushConsumer2.shutdown();
+
 
     }
 
@@ -201,10 +196,11 @@ public class TransactionMessageIT extends ContainerIntegrationTestBase {
         System.out.println("topic " + topic + " created");
 
         final String group = generateGroup();
-        DefaultMQPushConsumer pushConsumer = createPushConsumer(group);
-        pushConsumer.subscribe(topic, "*");
+
         AtomicInteger receivedMsgCount = new AtomicInteger(0);
         Map<String, Message> msgSentMap = new HashMap<>();
+        DefaultMQPushConsumer pushConsumer = createPushConsumer(group);
+        pushConsumer.subscribe(topic, "*");
         pushConsumer.registerMessageListener((MessageListenerConcurrently) (msgs, context) -> {
             for (MessageExt msg : msgs) {
                 System.out.println("receive trans msgId=" + msg.getMsgId() + ", transactionId=" + msg.getTransactionId());

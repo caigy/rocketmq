@@ -227,9 +227,7 @@ public class TransactionalMessageBridge {
     }
 
     public boolean putMessage(MessageExtBrokerInner messageInner) {
-        PutMessageResult putMessageResult = this.brokerController.getEscapeBridge().putMessage(messageInner);
-        System.out.println(this.brokerController.getBrokerIdentity()
-            + " put msg " + messageInner + ": " + putMessageResult);
+        PutMessageResult putMessageResult = store.putMessage(messageInner);
         if (putMessageResult != null
             && putMessageResult.getPutMessageStatus() == PutMessageStatus.PUT_OK) {
             return true;
@@ -347,5 +345,19 @@ public class TransactionalMessageBridge {
 
     public BrokerController getBrokerController() {
         return brokerController;
+    }
+
+    public boolean escapeMessage(MessageExtBrokerInner messageInner) {
+        PutMessageResult putMessageResult = this.brokerController.getEscapeBridge().putMessage(messageInner);
+        System.out.println(this.brokerController.getBrokerIdentity()
+            + " put msg " + messageInner + ": " + putMessageResult);
+        if (putMessageResult != null
+            && putMessageResult.getPutMessageStatus() == PutMessageStatus.PUT_OK) {
+            return true;
+        } else {
+            LOGGER.error("Escaping message failed, topic: {}, queueId: {}, msgId: {}",
+                messageInner.getTopic(), messageInner.getQueueId(), messageInner.getMsgId());
+            return false;
+        }
     }
 }
